@@ -1,0 +1,4 @@
+textures/
+client.jar
+*.zip
+/target
