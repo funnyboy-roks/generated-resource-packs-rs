@@ -2,10 +2,15 @@
 name = "gen-rp-rs"
 version = "0.1.0"
 edition = "2024"
+default-run = "gen-rp-rs"
+
+[[bin]]
+name = "k_means_test"
 
 [dependencies]
 anyhow = "1.0.98"
 image = { version = "0.25.6", default-features = false, features = ["png"] }
+rand = "0.9.2"
 reqwest = { version = "0.12.22", features = ["blocking", "json"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.141"

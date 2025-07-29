@@ -1,227 +1,18 @@
 #![allow(clippy::uninlined_format_args)]
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Cursor, Write},
+    io::BufReader,
     path::{Path, PathBuf},
     thread,
-    time::Instant,
 };
 
 use anyhow::Context;
-use image::{DynamicImage, ImageReader};
-use reqwest::blocking as reqwest;
-use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
-use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Latest {
-    pub release: String,
-    pub snapshot: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Version {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub url: String,
-    pub time: String,
-    pub release_time: String,
-    pub sha1: String,
-    pub compliance_level: u32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Manifest {
-    pub latest: Latest,
-    pub versions: Vec<Version>,
-}
-
-const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetIndex {
-    pub id: String,
-    pub sha1: String,
-    pub size: u64,
-    pub total_size: u64,
-    pub url: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadInfo {
-    pub sha1: String,
-    pub size: u64,
-    pub url: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct Downloads {
-    pub client: DownloadInfo,
-    pub client_mappings: DownloadInfo,
-    pub server: DownloadInfo,
-    pub server_mappings: DownloadInfo,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VersionMeta {
-    pub asset_index: AssetIndex,
-    pub downloads: Downloads,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SupportedFormats {
-    min_inclusive: u32,
-    max_inclusive: u32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Pack<'a> {
-    description: &'a str,
-    pack_format: u32,
-    supported_formats: SupportedFormats,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PackMcMeta<'a> {
-    pub pack: Pack<'a>,
-}
-
-fn fetch_jar() -> anyhow::Result<File> {
-    let jar_path = Path::new("client.jar");
-    if !std::fs::exists(jar_path)? {
-        let res = reqwest::get(MANIFEST_URL)?;
-        let json: Manifest = res.json()?;
-
-        let version = json
-            .versions
-            .first()
-            .context("No versions found at manifest URL")?;
-
-        let res = reqwest::get(&version.url)?;
-        let meta: VersionMeta = res.json()?;
-        println!("Getting version {}", version.id);
-
-        let mut res = reqwest::get(&meta.downloads.client.url)?;
-        let mut jar_file = File::create_new(jar_path)?;
-
-        std::io::copy(&mut res, &mut jar_file).context("downloading client.jar")?;
-        println!("Downloaded to {}", jar_path.display());
-        drop(jar_file);
-    } else {
-        println!("{} already exists, skipping download.", jar_path.display());
-    }
-
-    Ok(File::open(jar_path)?)
-}
-
-fn generate_pack(
-    pack_name: impl AsRef<str>,
-    description: impl AsRef<str>,
-    zip: bool,
-    f: fn(DynamicImage) -> DynamicImage,
-) -> anyhow::Result<()> {
-    let start = Instant::now();
-    let pack_name = pack_name.as_ref();
-    let description = description.as_ref();
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let mut writer = if zip {
-        let path = format!("{}.zip", pack_name);
-        let f = File::create(&path).with_context(|| format!("Creating file {}", &path))?;
-        let f = BufWriter::new(f);
-        Some(ZipWriter::new(f))
-    } else {
-        None
-    };
-
-    let mut image_buf = Vec::new();
-    for entry in WalkDir::new("textures") {
-        let entry = entry?;
-        if entry.path().is_dir() {
-            continue;
-        }
-        anyhow::ensure!(entry.file_name().as_encoded_bytes().ends_with(b".png"));
-
-        let image = ImageReader::open(entry.path())
-            .with_context(|| format!("Reading image {}", entry.path().display()))?
-            .decode()
-            .context("Decoding image")?;
-
-        let image = f(image);
-
-        let path = if entry.file_name().as_encoded_bytes() == b"pack.png" {
-            if writer.is_some() {
-                PathBuf::from_iter(["pack.png"])
-            } else {
-                PathBuf::from_iter([pack_name, "pack.png"])
-            }
-        } else {
-            let mut path = if writer.is_some() {
-                PathBuf::from_iter(&["assets", "minecraft"])
-            } else {
-                PathBuf::from_iter(&[pack_name, "assets", "minecraft"])
-            };
-            path.push(entry.path());
-            path
-        };
-
-        if let Some(ref mut writer) = writer {
-            writer.start_file_from_path(path, options)?;
-            let mut cursor = Cursor::new(&mut image_buf);
-            image.write_to(&mut cursor, image::ImageFormat::Png)?;
-            writer.write_all(&image_buf)?;
-            image_buf.clear();
-        } else {
-            let parent = path
-                .parent()
-                .with_context(|| format!("path contains no parent: {}", path.display()))?;
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Making dir {}", parent.display()))?;
-
-            image
-                .save(&path)
-                .with_context(|| format!("Saving image: {}", path.display()))?;
-        }
-    }
-
-    let pack_mcmeta = serde_json::to_string_pretty(&PackMcMeta {
-        pack: Pack {
-            description,
-            pack_format: 64,
-            supported_formats: SupportedFormats {
-                min_inclusive: 3,
-                max_inclusive: 64,
-            },
-        },
-    })?;
-    if let Some(ref mut writer) = writer {
-        writer.start_file("pack.mcmeta", options)?;
-        writer.write_all(pack_mcmeta.as_bytes())?;
-    } else {
-        std::fs::write(PathBuf::from_iter([pack_name, "pack.mcmeta"]), pack_mcmeta)
-            .context("Writing pack.mcmeta")?;
-    }
-
-    let elapsed = start.elapsed();
-
-    if let Some(writer) = writer {
-        writer.finish()?;
-    }
-    println!(
-        "Finished generating \"{}\" pack in {}ms",
-        pack_name,
-        elapsed.as_millis()
-    );
-
-    Ok(())
-}
+use gen_rp_rs::{
+    fetch_jar, generate_pack,
+    k_means::{closest, k_means},
+};
+use image::{GenericImageView, Rgb};
+use zip::ZipArchive;
 
 fn rgb_to_hsv([r, g, b]: &[u8; 3]) -> [f32; 3] {
     let rp = *r as f32 / 255.;
@@ -336,14 +127,23 @@ fn main() -> anyhow::Result<()> {
     }
 
     pack!(
-        "greyscale",
+        "Greyscale",
         "§7All Textures are Greyscale\n§3By: funnyboy_roks",
         |image| image.grayscale()
     );
 
     pack!(
-        "saturation",
-        "§7Saturates all textures\n§3By: funnyboy_roks",
+        "Invert",
+        "§6All Textures are Inverted\n§3By: funnyboy_roks",
+        |mut image| {
+            image.invert();
+            image
+        }
+    );
+
+    pack!(
+        "Saturation",
+        "§6Saturates all textures\n§3By: funnyboy_roks",
         |image| {
             let mut image = image.into_rgba8();
 
@@ -363,6 +163,52 @@ fn main() -> anyhow::Result<()> {
     );
 
     pack!(
+        "Average",
+        "§6Averages all textures\n§3By: funnyboy_roks",
+        |image| {
+            let mut image = image.into_rgba8();
+
+            let mut r = 0u32;
+            let mut g = 0u32;
+            let mut b = 0u32;
+            let mut i = 0u32;
+
+            let (width, height) = image.dimensions();
+
+            for (x, y) in (0..height).flat_map(|y| (0..width).map(move |x| (x, y))) {
+                let px = image.get_pixel(x, y);
+
+                if px[3] > 0 {
+                    r += px[0] as u32;
+                    g += px[1] as u32;
+                    b += px[2] as u32;
+                    i += 1;
+                }
+            }
+
+            if i == 0 {
+                return image.into();
+            }
+
+            let r = (r / i) as u8;
+            let g = (g / i) as u8;
+            let b = (b / i) as u8;
+
+            for (x, y) in (0..height).flat_map(|y| (0..width).map(move |x| (x, y))) {
+                let px = image.get_pixel_mut(x, y);
+
+                if px[3] > 0 {
+                    px[0] = r;
+                    px[1] = g;
+                    px[2] = b;
+                }
+            }
+
+            image.into()
+        },
+    );
+
+    pack!(
         "8bit",
         "§6All textures are 8-bit\n§3By: funnyboy_roks",
         |image| {
@@ -375,6 +221,30 @@ fn main() -> anyhow::Result<()> {
                 px[0] = (px[0] / 32) * 32;
                 px[1] = (px[1] / 32) * 32;
                 px[2] = (px[2] / 64) * 64;
+            }
+
+            image.into()
+        },
+    );
+
+    pack!(
+        "K-Means",
+        "§6K-Means or something\n§3By: funnyboy_roks",
+        |image| {
+            let clusters = k_means(
+                4,
+                &image
+                    .pixels()
+                    .map(|(_, _, x)| Rgb::<u8>([x[0], x[1], x[2]]))
+                    .collect::<Vec<_>>(),
+            );
+            let mut image = image.into_rgba8();
+
+            for px in image.pixels_mut() {
+                if px[3] > 0 {
+                    let next = closest(Rgb::<u8>([px[0], px[1], px[2]]), &clusters);
+                    px.0[..3].copy_from_slice(&next.0);
+                }
             }
 
             image.into()
