@@ -3,11 +3,12 @@ use std::{
     fs::File,
     io::{BufWriter, Cursor, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use image::{DynamicImage, ImageReader};
+use prog::Progress;
 use reqwest::blocking as reqwest;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -103,7 +104,8 @@ pub fn fetch_jar() -> anyhow::Result<File> {
 
         let version = json
             .versions
-            .first()
+            .into_iter()
+            .find(|v| v.kind == "release")
             .context("No versions found at manifest URL")?;
 
         let res = reqwest::get(&version.url)?;
@@ -126,6 +128,7 @@ pub fn fetch_jar() -> anyhow::Result<File> {
 pub fn generate_pack(
     pack_name: impl AsRef<str>,
     description: impl AsRef<str>,
+    progress: &mut Progress<usize>,
     zip: bool,
     f: fn(DynamicImage) -> DynamicImage,
 ) -> anyhow::Result<()> {
@@ -143,13 +146,18 @@ pub fn generate_pack(
     };
 
     let mut image_buf = Vec::new();
+    let mut i = 0;
     for entry in WalkDir::new("textures") {
         let entry = entry?;
+        if i % 32 == 0 {
+            progress.update(i);
+        }
+        i += 1;
         if entry.path().is_dir() {
+            progress.set_status(entry.path().display());
             continue;
         }
         anyhow::ensure!(entry.file_name().as_encoded_bytes().ends_with(b".png"));
-        eprintln!("Processing {}", entry.file_name().display());
 
         let image = ImageReader::open(entry.path())
             .with_context(|| format!("Reading image {}", entry.path().display()))?
@@ -193,6 +201,8 @@ pub fn generate_pack(
         }
     }
 
+    progress.update(i);
+
     let pack_mcmeta = serde_json::to_string_pretty(&PackMcMeta {
         pack: Pack {
             description,
@@ -216,11 +226,15 @@ pub fn generate_pack(
     if let Some(writer) = writer {
         writer.finish()?;
     }
-    println!(
-        "Finished generating \"{}\" pack in {}ms",
-        pack_name,
-        elapsed.as_millis()
-    );
+    // println!(
+    //     "Finished generating \"{}\" pack in {}ms",
+    //     pack_name,
+    //     elapsed.as_millis()
+    // );
+    progress.set_status(format!(
+        "\x1b[32mDone!\x1b[0m in {:?}",
+        Duration::from_millis(elapsed.as_millis() as u64)
+    ));
 
     Ok(())
 }

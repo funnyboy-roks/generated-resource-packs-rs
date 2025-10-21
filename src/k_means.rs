@@ -14,7 +14,7 @@ pub fn dist_sq(p1: Point, p2: Point) -> f64 {
         + (p1[2] as f64 - p2[2] as f64).powi(2)
 }
 
-fn dist(p1: Point, p2: Point) -> f64 {
+pub fn dist(p1: Point, p2: Point) -> f64 {
     dist_sq(p1, p2).sqrt()
 }
 

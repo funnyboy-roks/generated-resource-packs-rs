@@ -392,6 +392,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "image",
+ "prog",
  "rand",
  "reqwest",
  "serde",
@@ -1053,6 +1054,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "prog"
+version = "0.1.0"
+dependencies = [
+ "terminal_size",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1421,6 +1429,16 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60b8cb979cb11c32ce1603f8137b22262a9d131aaa5c37b5678025f22b8becd0"
+dependencies = [
+ "rustix",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

@@ -3,16 +3,27 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
 };
 
 use anyhow::Context;
-use gen_rp_rs::{
-    fetch_jar, generate_pack,
-    k_means::{closest, k_means},
-};
-use image::{GenericImageView, Rgb};
+use gen_rp_rs::{fetch_jar, generate_pack};
+use image::Rgba;
+use prog::{Progress, ProgressGroup};
+use walkdir::WalkDir;
 use zip::ZipArchive;
+
+// TODO: Pack version from version.json
+
+fn to_8bit(rgb: Rgba<i32>) -> Rgba<i32> {
+    Rgba([
+        (rgb.0[0] / 32) * 32,
+        (rgb.0[1] / 32) * 32,
+        (rgb.0[2] / 64) * 64,
+        rgb.0[3],
+    ])
+}
 
 fn rgb_to_hsv([r, g, b]: &[u8; 3]) -> [f32; 3] {
     let rp = *r as f32 / 255.;
@@ -112,16 +123,33 @@ fn main() -> anyhow::Result<()> {
     let zip = true;
     let mut threads = Vec::new();
 
+    let num_files = WalkDir::new("textures").into_iter().count();
+    let prog_group = ProgressGroup::builder()
+        .progress_width(80)
+        .style(prog::ProgressStyle {
+            use_percent: true,
+            ..Default::default()
+        })
+        .build();
+
     macro_rules! pack {
         ($name: literal, $desc: literal, $($fn: tt)+) => {{
+            let prog_group = Arc::clone(&prog_group);
             threads.push(thread::spawn(move || {
-                let res = generate_pack($name, $desc, zip, $($fn)+);
+                let mut p = Progress::builder(prog_group)
+                    .label($name)
+                    .init(0)
+                    .max(num_files - 1)
+                    .build()
+                    .unwrap();
+                let res = generate_pack($name, $desc, &mut p, zip, $($fn)+);
                 match res {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("Error while generating pack \"{}\": {:?}", $name, e);
                     }
                 }
+                p
             }));
         }};
     }
@@ -157,6 +185,68 @@ fn main() -> anyhow::Result<()> {
 
                 px.0[..3].copy_from_slice(&rgb);
             }
+
+            image.into()
+        },
+    );
+
+    pack!(
+        "1-bit",
+        "§6Convert all textures to 1-bit\n§3By: funnyboy_roks",
+        |image| {
+            let mut image = image.into_rgba8();
+
+            let (width, height) = image.dimensions();
+            let (width, height) = (width as usize, height as usize);
+            let mut px: Vec<_> = image
+                .pixels()
+                .map(|p| Rgba::<i32>([p.0[0] as _, p.0[1] as _, p.0[2] as _, p.0[3] as _]))
+                .collect();
+
+            for (x, y) in (0..height).flat_map(|y| (0..width).map(move |x| (x, y))) {
+                let old = px[y * width + x];
+                let new = to_8bit(old);
+                px[y * width + x] = new;
+                let quant = [
+                    old.0[0] - new.0[0],
+                    old.0[1] - new.0[1],
+                    old.0[2] - new.0[2],
+                    old.0[3] - new.0[3],
+                ];
+                // dbg!(old, new, diff);
+
+                let mut add = |dx, dy, numerator, denominator| {
+                    let x = x.checked_add_signed(dx)?;
+                    if x >= width {
+                        return None;
+                    };
+                    let y = y.checked_add_signed(dy)?;
+                    if y >= height {
+                        return None;
+                    };
+                    let a = &mut px[y * width + x];
+                    a.0[0] += quant[0] * numerator / denominator;
+                    a.0[1] += quant[1] * numerator / denominator;
+                    a.0[2] += quant[2] * numerator / denominator;
+                    a.0[3] += quant[3] * numerator / denominator;
+                    Some(())
+                };
+
+                add(1, 0, 7, 16);
+                add(-1, 1, 3, 16);
+                add(0, 1, 5, 16);
+                add(1, 1, 1, 16);
+            }
+
+            image
+                .pixels_mut()
+                .zip(px.into_iter())
+                .for_each(|(old, new)| {
+                    old.0[0] = new.0[0].clamp(0, 255) as u8;
+                    old.0[1] = new.0[1].clamp(0, 255) as u8;
+                    old.0[2] = new.0[2].clamp(0, 255) as u8;
+                    old.0[3] = new.0[3].clamp(0, 255) as u8;
+                });
 
             image.into()
         },
@@ -227,33 +317,34 @@ fn main() -> anyhow::Result<()> {
         },
     );
 
-    pack!(
-        "K-Means",
-        "§6K-Means or something\n§3By: funnyboy_roks",
-        |image| {
-            let clusters = k_means(
-                4,
-                &image
-                    .pixels()
-                    .map(|(_, _, x)| Rgb::<u8>([x[0], x[1], x[2]]))
-                    .collect::<Vec<_>>(),
-            );
-            let mut image = image.into_rgba8();
+    // pack!(
+    //     "K-Means",
+    //     "§6K-Means or something\n§3By: funnyboy_roks",
+    //     |image| {
+    //         let clusters = k_means(
+    //             4,
+    //             &image
+    //                 .pixels()
+    //                 .map(|(_, _, x)| Rgb::<u8>([x[0], x[1], x[2]]))
+    //                 .collect::<Vec<_>>(),
+    //         );
+    //         let mut image = image.into_rgba8();
 
-            for px in image.pixels_mut() {
-                if px[3] > 0 {
-                    let next = closest(Rgb::<u8>([px[0], px[1], px[2]]), &clusters);
-                    px.0[..3].copy_from_slice(&next.0);
-                }
-            }
+    //         for px in image.pixels_mut() {
+    //             if px[3] > 0 {
+    //                 let next = closest(Rgb::<u8>([px[0], px[1], px[2]]), &clusters);
+    //                 px.0[..3].copy_from_slice(&next.0);
+    //             }
+    //         }
 
-            image.into()
-        },
-    );
+    //         image.into()
+    //     },
+    // );
 
-    for t in threads {
+    threads.into_iter().for_each(|t| {
         t.join().unwrap();
-    }
+    });
+    prog_group.draw();
 
     Ok(())
 }
