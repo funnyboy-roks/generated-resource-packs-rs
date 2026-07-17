@@ -1,14 +1,24 @@
 use std::{collections::HashMap, path::Path};
 
-use ::reqwest::StatusCode;
+use ::reqwest::{
+    StatusCode,
+    blocking::{self as reqwest, Client},
+};
 use anyhow::{Context, bail};
-use reqwest::blocking as reqwest;
+use lazy_static::lazy_static;
 use reqwest::multipart::Form;
 use serde::{Deserialize, Serialize};
 
 use crate::Version;
 
 const MODRINTH_API: &str = "https://api.modrinth.com/v2";
+
+lazy_static! {
+    static ref CLIENT: Client = Client::builder()
+        .user_agent("funnyboy-roks/generated-resource-packs (fbr@fbr.dev)")
+        .build()
+        .expect("Failed to build client");
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateVersionRes {}
@@ -61,8 +71,6 @@ impl CreateVersionReq<'_> {
         file_name: impl Into<String>,
         file: &Path,
     ) -> anyhow::Result<()> {
-        let client = reqwest::Client::builder().build().unwrap();
-
         #[derive(Debug, Serialize)]
         struct AdditionalData<'a> {
             #[serde(flatten)]
@@ -85,7 +93,7 @@ impl CreateVersionReq<'_> {
             dependencies: &[],
         };
 
-        let response = client
+        let response = CLIENT
             .post(format!("{}/version", MODRINTH_API))
             .header("Authorization", modrinth_token)
             .multipart(
@@ -127,8 +135,7 @@ pub fn project_has_version(
     slug: &str,
     version: &Version,
 ) -> anyhow::Result<bool> {
-    let client = reqwest::Client::builder().build().unwrap();
-    let req = client
+    let req = CLIENT
         .get(format!("{}/project/{}/version", MODRINTH_API, slug))
         .query(&[("game_versions", &version.id)])
         .header("Authorization", modrinth_token);
@@ -157,8 +164,7 @@ pub fn project_latest_version<'a>(
     slug: &str,
     versions: &HashMap<&'a str, &'a Version>,
 ) -> anyhow::Result<Option<&'a Version>> {
-    let client = reqwest::Client::builder().build().unwrap();
-    let req = client
+    let req = CLIENT
         .get(format!("{}/project/{}/version", MODRINTH_API, slug))
         .header("Authorization", modrinth_token);
     let response = req.send()?;

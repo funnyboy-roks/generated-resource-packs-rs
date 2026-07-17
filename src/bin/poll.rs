@@ -208,7 +208,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         let wait = Duration::from(cli.interval) - start.elapsed();
-        eprintln!("Waiting {:?}", wait);
+        eprintln!("Waiting {}", humantime::format_duration(wait));
         thread::sleep(wait);
     }
 }
