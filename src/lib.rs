@@ -391,7 +391,7 @@ pub struct Pack<'a> {
 
 pub fn build_packs(
     version: &Version,
-    packs: &[Pack<'_>],
+    packs: &'static [Pack<'static>],
     textures_dir: Arc<Path>,
     out_dir: Arc<Path>,
 ) -> anyhow::Result<()> {
@@ -420,29 +420,26 @@ pub fn build_packs(
         let prog_group = Arc::clone(&prog_group);
         let textures_dir = textures_dir.clone();
         let out_dir = out_dir.clone();
-        let pack_name = String::from(pack.name);
-        let pack_desc = String::from(pack.desc);
-        let pack_func = pack.func;
         threads.push(thread::spawn(move || {
             let mut p = Progress::builder(prog_group)
-                .label(&pack_name)
+                .label(&pack.name)
                 .init(0)
                 .max(num_files - 1)
                 .build()
                 .unwrap();
             let res = generate_pack(
-                &pack_name,
-                pack_desc,
+                pack.name,
+                pack.desc,
                 &mut p,
                 &textures_dir,
                 &out_dir,
                 pack_format,
-                pack_func,
+                pack.func,
             );
             match res {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("Error while generating pack \"{}\": {:?}", pack_name, e);
+                    eprintln!("Error while generating pack \"{}\": {:?}", pack.name, e);
                 }
             }
         }));
