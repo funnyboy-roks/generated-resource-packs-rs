@@ -1,129 +1,49 @@
 #![allow(clippy::uninlined_format_args)]
-use std::{
-    fs::File,
-    io::BufReader,
-    path::{Path, PathBuf},
-    sync::Arc,
-    thread,
-};
+use std::{path::Path, sync::Arc, thread};
 
 use anyhow::Context;
-use gen_rp_rs::{fetch_jar, generate_pack};
+use clap::Parser;
+use gen_rp_rs::{
+    Version,
+    colour::{hsv_to_rgb, rgb_to_hsv, to_8bit},
+    extract_jar, generate_pack, modrinth,
+};
 use image::Rgba;
 use prog::{Progress, ProgressGroup};
+use tempfile::TempDir;
 use walkdir::WalkDir;
-use zip::ZipArchive;
 
 // TODO: Pack version from version.json
 
-fn to_8bit(rgb: Rgba<i32>) -> Rgba<i32> {
-    Rgba([
-        (rgb.0[0] / 32) * 32,
-        (rgb.0[1] / 32) * 32,
-        (rgb.0[2] / 64) * 64,
-        rgb.0[3],
-    ])
-}
-
-fn rgb_to_hsv([r, g, b]: &[u8; 3]) -> [f32; 3] {
-    let rp = *r as f32 / 255.;
-    let gp = *g as f32 / 255.;
-    let bp = *b as f32 / 255.;
-
-    let c_max = rp.max(gp).max(bp);
-    let c_min = rp.min(gp).min(bp);
-    let delta = c_max - c_min;
-
-    let h = if delta == 0. {
-        0.
-    } else if c_max == rp {
-        60. * (((gp - bp) / delta) % 6.)
-    } else if c_max == gp {
-        60. * ((bp - rp) / delta + 2.)
-    } else if c_max == bp {
-        60. * ((rp - gp) / delta + 4.)
-    } else {
-        unreachable!()
-    };
-
-    let s = if c_max == 0. { 0. } else { delta / c_max };
-    let v = c_max;
-
-    [h, s, v]
-}
-
-// https://docs.rs/hsv/latest/hsv/fn.hsv_to_rgb.html
-pub fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [u8; 3] {
-    fn is_between(value: f32, min: f32, max: f32) -> bool {
-        min <= value && value < max
-    }
-
-    let c = v * s;
-    let h = h / 60.0;
-    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
-    let m = v - c;
-
-    let (r, g, b) = if is_between(h, 0.0, 1.0) {
-        (c, x, 0.0)
-    } else if is_between(h, 1.0, 2.0) {
-        (x, c, 0.0)
-    } else if is_between(h, 2.0, 3.0) {
-        (0.0, c, x)
-    } else if is_between(h, 3.0, 4.0) {
-        (0.0, x, c)
-    } else if is_between(h, 4.0, 5.0) {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-
-    [
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    ]
+#[derive(clap::Parser)]
+struct Cli {
+    #[clap(short, long)]
+    slug: Option<String>,
+    version: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut jar_file = fetch_jar()?;
+    let cli = Cli::parse();
 
-    let mut dec = ZipArchive::new(BufReader::new(&mut jar_file))?;
+    let version = if let Some(id) = cli.version {
+        Version::get_by_id(&id).context("Fetching version")?
+    } else {
+        Version::get_latest().context("Getting latest version")?
+    };
 
-    for i in 0..dec.len() {
-        let mut file = dec.by_index(i)?;
-        let path1 = file
-            .enclosed_name()
-            .with_context(|| format!("Malformed path in jar: {}", file.name()))?;
+    let jar_file = version.download_jar("clients")?;
 
-        if path1
-            .file_name()
-            .is_none_or(|n| !n.to_string_lossy().ends_with(".png"))
-        {
-            continue;
-        }
+    let textures_dir = TempDir::new().context("Creating temporary directory for textures")?;
+    let out_dir = Path::new("out");
 
-        let path = if path1 != Path::new("pack.png") {
-            path1.components().skip(2).collect::<PathBuf>()
-        } else {
-            PathBuf::from_iter(["textures", "pack.png"])
-        };
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("Creating dir: {}", out_dir.display()))?;
 
-        let parent = path
-            .parent()
-            .with_context(|| format!("path contains no parent: {}", path.display()))?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Making dir {}", parent.display()))?;
+    let pack_format = extract_jar(jar_file, dbg!(&textures_dir)).context("Extracting JAR")?;
 
-        let mut out =
-            File::create(&path).with_context(|| format!("Creating file {}", path.display()))?;
-
-        std::io::copy(&mut file, &mut out).with_context(|| format!("Saving {}", path.display()))?;
-    }
-
-    let zip = true;
     let mut threads = Vec::new();
 
-    let num_files = WalkDir::new("textures").into_iter().count();
+    let num_files = WalkDir::new(&textures_dir).into_iter().count();
     let prog_group = ProgressGroup::builder()
         .progress_width(80)
         .style(prog::ProgressStyle {
@@ -135,6 +55,7 @@ fn main() -> anyhow::Result<()> {
     macro_rules! pack {
         ($name: literal, $desc: literal, $($fn: tt)+) => {{
             let prog_group = Arc::clone(&prog_group);
+            let textures_dir = textures_dir.path().to_path_buf();
             threads.push(thread::spawn(move || {
                 let mut p = Progress::builder(prog_group)
                     .label($name)
@@ -142,7 +63,7 @@ fn main() -> anyhow::Result<()> {
                     .max(num_files - 1)
                     .build()
                     .unwrap();
-                let res = generate_pack($name, $desc, &mut p, zip, $($fn)+);
+                let res = generate_pack($name, $desc, &mut p, &textures_dir, &out_dir, pack_format, $($fn)+);
                 match res {
                     Ok(()) => {}
                     Err(e) => {
@@ -345,6 +266,36 @@ fn main() -> anyhow::Result<()> {
         t.join().unwrap();
     });
     prog_group.draw();
+    drop(textures_dir);
+
+    let modrinth_token =
+        std::env::var("MODRINTH_TOKEN").context("MODRINTH_TOKEN env var not set")?;
+
+    if let Some(slug) = &cli.slug {
+        eprintln!("Uploading to Modrinth...");
+        modrinth::CreateVersionReq {
+            name: &version.id,
+            version_number: &version.id,
+            changelog: &format!("Update pack for {}", version.id),
+            game_versions: &[&version.id],
+            version_type: match &*version.kind {
+                "snapshot" => modrinth::VersionType::Beta,
+                "release" => modrinth::VersionType::Release,
+                _ => panic!("Unknown version kind: {}", version.kind),
+            },
+            status: modrinth::VersionStatus::Listed,
+            project_id: slug,
+        }
+        .send(
+            &modrinth_token,
+            "Saturation.zip",
+            &out_dir.join("Saturation.zip"),
+        )
+        .context("Creating release")?;
+        eprintln!("Done uploading.");
+    } else {
+        eprintln!("Skipping modrinth upload.");
+    }
 
     Ok(())
 }

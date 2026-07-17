@@ -2,3 +2,7 @@ textures/
 client.jar
 *.zip
 /target
+/client
+/clients
+/out
+.env
